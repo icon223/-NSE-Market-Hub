@@ -1,0 +1,24 @@
+[package]
+name = "nse_market_hub"
+version = "1.0.0"
+description = "NSE Market Hub desktop application"
+authors = ["NSE Market Hub"]
+edition = "2021"
+
+[lib]
+name = "nse_market_hub_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "nse_market_hub"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tauri-plugin-http = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

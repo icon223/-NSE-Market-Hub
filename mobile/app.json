@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "NSE Market Hub",
+    "slug": "nse-market-hub",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "nsemarket",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#09101f"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nsemarkethub.app"
+    },
+    "android": {
+      "package": "com.nsemarkethub.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#09101f"
+      }
+    },
+    "plugins": ["expo-notifications"]
+  }
+}

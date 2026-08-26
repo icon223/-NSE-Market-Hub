@@ -1,0 +1,10 @@
+{
+  "name": "market-core",
+  "version": "1.0.0",
+  "description": "Shared market simulation engine and data for the NSE Market Hub desktop & mobile apps.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}
