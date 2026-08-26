@@ -5,7 +5,8 @@ import {
 } from "react-native";
 import {
   NSE_COMPANIES, NSE_NEWS,
-  fetchAI, sendDiscord, fmt, fmtPct, fmtVol, fmtTime, fmtDate, useMarket
+  fetchAI, sendDiscord, fmt, fmtPct, fmtVol, fmtTime, fmtDate, useMarket,
+  getMode, getAccount, getPositions, placeOrder
 } from "../core/index.js";
 import Sparkline from "./components/Sparkline.jsx";
 import AreaChart from "./components/AreaChart.jsx";
@@ -14,6 +15,7 @@ import { notify } from "./notifications.js";
 import { C, mono } from "./theme.js";
 
 const { width: SCREEN_W } = Dimensions.get("window");
+const isTradeable = (s) => s.market === "NASDAQ" || s.market === "NYSE";
 
 function Badge({ pct }) {
   const up = pct >= 0;
@@ -43,6 +45,21 @@ export default function App() {
   const [aiSub, setAiSub] = useState("report");
   const [showSettings, setShowSettings] = useState(false);
 
+  const [backendUrl, setBackendUrl] = usePersistentState("nmh_backend", "");
+  const [serverToken, setServerToken] = usePersistentState("nmh_token", "");
+  const [backendStatus, setBackendStatus] = useState("off");
+  const [account, setAccount] = useState(null);
+  const [positions, setPositions] = useState([]);
+  const [tradeSym, setTradeSym] = useState(null);
+  const [tradeSide, setTradeSide] = useState("buy");
+  const [tradeType, setTradeType] = useState("market");
+  const [tradeQty, setTradeQty] = useState("");
+  const [tradeLimit, setTradeLimit] = useState("");
+  const [tradeMsg, setTradeMsg] = useState("");
+
+  const connected = backendStatus === "paper" || backendStatus === "live";
+  const realMoney = backendStatus === "live";
+
   const [alerts, setAlerts] = useState([]);
   const [newsFilter, setNewsFilter] = useState("ALL");
   const [report, setReport] = useState("");
@@ -61,7 +78,46 @@ export default function App() {
     notify(`${s.ticker} ${a.changePct >= 0 ? "▲" : "▼"} ${fmtPct(a.changePct)}`, `${s.name} — ${reason}`);
   }, []);
 
-  const { nse, nerob, ea, global } = useMarket({ threshold, onAlert });
+  useEffect(() => {
+    if (!backendUrl || !serverToken) {
+      setBackendStatus("off"); setAccount(null); setPositions([]); return;
+    }
+    let active = true;
+    const refresh = async () => {
+      try {
+        const m = await getMode(backendUrl, serverToken);
+        const [acc, pos] = await Promise.all([
+          getAccount(backendUrl, serverToken),
+          getPositions(backendUrl, serverToken),
+        ]);
+        if (!active) return;
+        setBackendStatus(m.paper ? "paper" : "live");
+        setAccount(acc); setPositions(pos);
+      } catch (e) {
+        if (active) setBackendStatus("error");
+      }
+    };
+    refresh();
+    const id = setInterval(refresh, 6000);
+    return () => { active = false; clearInterval(id); };
+  }, [backendUrl, serverToken]);
+
+  const submitTrade = async () => {
+    if (!tradeSym || !tradeQty) return;
+    setTradeMsg("Placing order…");
+    try {
+      const o = await placeOrder(
+        { symbol: tradeSym, qty: parseFloat(tradeQty), side: tradeSide, type: tradeType, limit_price: tradeType === "limit" ? parseFloat(tradeLimit) : undefined },
+        backendUrl, serverToken
+      );
+      setTradeMsg(`✅ Submitted (${o.status || "new"})`);
+      setTimeout(() => setTradeSym(null), 1200);
+    } catch (e) {
+      setTradeMsg("❌ " + (e && e.message ? e.message : "failed"));
+    }
+  };
+
+  const { nse, nerob, ea, global } = useMarket({ threshold, onAlert, backend: connected ? backendUrl : null, token: connected ? serverToken : null, live: connected });
 
   const allStocks = useMemo(() => [...nse, ...nerob, ...ea, ...global], [nse, nerob, ea, global]);
   const allStocksRef = useRef(allStocks);
@@ -132,10 +188,15 @@ export default function App() {
         <Text style={{ color: C.text, fontFamily: mono.fontFamily, fontSize: 13 }}>{s.currency} {fmt(s.price)}</Text>
         <Badge pct={s.changePct} />
       </View>
-      <TouchableOpacity onPress={() => toggleWatch(s.ticker)} style={{ paddingHorizontal: 6 }}>
+      <TouchableOpacity onPress={(e) => { e.stopPropagation(); toggleWatch(s.ticker); }} style={{ paddingHorizontal: 6 }}>
         <Text style={{ fontSize: 16 }}>{isWatched(s.ticker) ? "⭐" : "☆"}</Text>
       </TouchableOpacity>
-      <TouchableOpacity onPress={() => manualAlert(s)} style={styles.miniBtn}>
+      {isTradeable(s) && (
+        <TouchableOpacity onPress={(e) => { e.stopPropagation(); setTradeSide("buy"); setTradeSym(s.ticker); setTradeMsg(""); }} style={styles.miniBtn}>
+          <Text style={{ fontSize: 12, color: C.green }}>💱</Text>
+        </TouchableOpacity>
+      )}
+      <TouchableOpacity onPress={(e) => { e.stopPropagation(); manualAlert(s); }} style={styles.miniBtn}>
         <Text style={{ fontSize: 12 }}>📣</Text>
       </TouchableOpacity>
     </TouchableOpacity>
@@ -155,7 +216,10 @@ export default function App() {
           </View>
         </View>
         <View style={{ flexDirection: "row", alignItems: "center" }}>
-          <View style={styles.liveBadge}><View style={styles.liveDot} /><Text style={{ color: C.green, fontSize: 11, fontWeight: "600" }}>LIVE</Text></View>
+          <View style={[styles.liveBadge, connected && { backgroundColor: realMoney ? "rgba(234,57,67,.12)" : "rgba(22,199,132,.12)", borderColor: realMoney ? "rgba(234,57,67,.3)" : "rgba(22,199,132,.3)" }]}>
+            <View style={[styles.liveDot, { backgroundColor: connected ? (realMoney ? C.red : C.green) : C.sub }]} />
+            <Text style={{ color: connected ? (realMoney ? C.red : C.green) : C.sub, fontSize: 11, fontWeight: "600" }}>{connected ? (realMoney ? "LIVE $" : "PAPER") : "SIM"}</Text>
+          </View>
           <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.gearBtn}>
             <Text style={{ color: C.text, fontSize: 16 }}>⚙</Text>
           </TouchableOpacity>
@@ -196,6 +260,11 @@ export default function App() {
                     <View key={l} style={styles.sb}><Text style={{ color: C.sub, fontSize: 9 }}>{l.toUpperCase()}</Text><Text style={[styles.sv, { color: C.text }]}>{v}</Text></View>
                   ))}
                 </View>
+                {isTradeable(selected) && (
+                  <TouchableOpacity style={[styles.outlineBtn, { borderColor: C.green }]} onPress={() => { setTradeSide("buy"); setTradeSym(selected.ticker); setTradeMsg(""); }}>
+                    <Text style={{ color: C.green, fontWeight: "600" }}>💱 Trade</Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity style={styles.outlineBtn} onPress={() => manualAlert(selected)}>
                   <Text style={{ color: C.text }}>📣 Discord Alert</Text>
                 </TouchableOpacity>
@@ -249,6 +318,41 @@ export default function App() {
         {tab === "portfolio" && (
           <View style={{ padding: 12 }}>
             <Text style={styles.st}>💼 Portfolio</Text>
+            {connected && (
+              <View style={styles.card}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <Text style={{ color: C.text, fontSize: 13, fontWeight: "600" }}>🏦 Alpaca {realMoney ? "Live" : "Paper"}</Text>
+                  <Text style={{ color: realMoney ? C.red : C.green, fontSize: 10, letterSpacing: 1 }}>{realMoney ? "REAL MONEY" : "PAPER"}</Text>
+                </View>
+                {account && (
+                  <View style={styles.pfSum}>
+                    <View style={styles.pfc}><Text style={styles.pfL}>EQUITY</Text><Text style={[styles.pfV, { color: C.text }]}>$ {fmtVol(parseFloat(account.equity || 0))}</Text></View>
+                    <View style={styles.pfc}><Text style={styles.pfL}>BUY PWR</Text><Text style={[styles.pfV, { color: C.text }]}>$ {fmtVol(parseFloat(account.buying_power || 0))}</Text></View>
+                  </View>
+                )}
+                {positions.length === 0
+                  ? <Text style={{ color: C.sub, marginTop: 8 }}>No open positions.</Text>
+                  : positions.map(p => {
+                    const upnl = parseFloat(p.unrealized_pl || 0);
+                    return (
+                      <View key={p.symbol} style={[styles.pfr, { marginTop: 6 }]}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.sym, { color: C.text }]}>{p.symbol}</Text>
+                          <Text style={{ color: C.sub, fontSize: 10 }}>qty {parseFloat(p.qty || 0).toLocaleString()} @ $ {fmt(parseFloat(p.avg_entry_price || 0))}</Text>
+                        </View>
+                        <View style={{ alignItems: "flex-end" }}>
+                          <Text style={[styles.pfV, { color: C.text, fontSize: 13 }]}>$ {fmt(parseFloat(p.market_value || 0))}</Text>
+                          <Text style={{ color: upnl >= 0 ? C.green : C.red, fontSize: 12 }}>{upnl >= 0 ? "+" : "-"} $ {fmtVol(Math.abs(upnl))}</Text>
+                        </View>
+                        <View style={{ flexDirection: "row", marginLeft: 8 }}>
+                          <TouchableOpacity onPress={() => { setTradeSide("buy"); setTradeSym(p.symbol); setTradeMsg(""); }}><Text style={{ color: C.green, fontSize: 12, marginRight: 8 }}>Buy</Text></TouchableOpacity>
+                          <TouchableOpacity onPress={() => { setTradeSide("sell"); setTradeSym(p.symbol); setTradeMsg(""); }}><Text style={{ color: C.red, fontSize: 12 }}>Sell</Text></TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  })}
+              </View>
+            )}
             <View style={styles.pfSum}>
               <View style={styles.pfc}><Text style={styles.pfL}>VALUE</Text><Text style={[styles.pfV, { color: C.text }]}>KES {fmtVol(totalValue)}</Text></View>
               <View style={styles.pfc}><Text style={styles.pfL}>P&L</Text><Text style={[styles.pfV, { color: totalPnl >= 0 ? C.green : C.red }]}>{totalPnl >= 0 ? "+" : "-"}KES {fmtVol(Math.abs(totalPnl))}</Text><Text style={{ color: totalPnl >= 0 ? C.green : C.red, fontSize: 11 }}>{fmtPct(totalPnlPct)}</Text></View>
@@ -342,8 +446,47 @@ export default function App() {
             <TextInput style={styles.input} placeholder="sk-..." placeholderTextColor={C.muted} value={apiKey} onChangeText={setApiKey} autoCapitalize="none" secureTextEntry />
             <Text style={styles.lbl}>Alert Threshold (%)</Text>
             <TextInput style={styles.input} keyboardType="numeric" value={String(threshold)} onChangeText={v => setThreshold(parseFloat(v) || 2.5)} />
+            <Text style={styles.lbl}>Trading Backend URL</Text>
+            <TextInput style={styles.input} placeholder="http://192.168.x.x:8080" placeholderTextColor={C.muted} value={backendUrl} onChangeText={setBackendUrl} autoCapitalize="none" />
+            <Text style={styles.lbl}>Backend Token</Text>
+            <TextInput style={styles.input} placeholder="SERVER_TOKEN" placeholderTextColor={C.muted} value={serverToken} onChangeText={setServerToken} autoCapitalize="none" secureTextEntry />
+            <Text style={{ fontSize: 11, color: backendStatus === "error" ? C.red : backendStatus === "off" ? C.sub : realMoney ? C.red : C.green, marginTop: 8 }}>
+              {backendStatus === "off" ? "● Not connected" : backendStatus === "error" ? "● Connection error" : realMoney ? "● LIVE real-money" : "● Paper connected"}
+            </Text>
             <TouchableOpacity style={styles.greenBtn} onPress={() => setShowSettings(false)}>
               <Text style={{ color: "#000", fontWeight: "700" }}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {tradeSym && (
+        <View style={styles.overlay}>
+          <View style={styles.settingsCard}>
+            <Text style={[styles.st, { marginBottom: 10 }]}>Trade {tradeSym}</Text>
+            {realMoney && <Text style={{ color: C.red, fontSize: 12, marginBottom: 8 }}>⚠ Live real-money order to your funded Alpaca account.</Text>}
+            <View style={styles.seg}>
+              <TouchableOpacity style={[styles.segBtn, tradeSide === "buy" && styles.segActive]} onPress={() => setTradeSide("buy")}><Text style={{ color: tradeSide === "buy" ? C.green : C.sub, fontSize: 12, fontWeight: "600" }}>Buy</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.segBtn, tradeSide === "sell" && styles.segActive]} onPress={() => setTradeSide("sell")}><Text style={{ color: tradeSide === "sell" ? C.red : C.sub, fontSize: 12, fontWeight: "600" }}>Sell</Text></TouchableOpacity>
+            </View>
+            <View style={styles.seg}>
+              <TouchableOpacity style={[styles.segBtn, tradeType === "market" && styles.segActive]} onPress={() => setTradeType("market")}><Text style={{ color: tradeType === "market" ? C.green : C.sub, fontSize: 12, fontWeight: "600" }}>Market</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.segBtn, tradeType === "limit" && styles.segActive]} onPress={() => setTradeType("limit")}><Text style={{ color: tradeType === "limit" ? C.green : C.sub, fontSize: 12, fontWeight: "600" }}>Limit</Text></TouchableOpacity>
+            </View>
+            <Text style={styles.lbl}>Quantity (shares)</Text>
+            <TextInput style={styles.input} keyboardType="numeric" placeholder="10" placeholderTextColor={C.muted} value={tradeQty} onChangeText={setTradeQty} autoCapitalize="none" />
+            {tradeType === "limit" && (
+              <>
+                <Text style={styles.lbl}>Limit Price (USD)</Text>
+                <TextInput style={styles.input} keyboardType="numeric" placeholder="0.00" placeholderTextColor={C.muted} value={tradeLimit} onChangeText={setTradeLimit} autoCapitalize="none" />
+              </>
+            )}
+            <TouchableOpacity style={[styles.greenBtn, { backgroundColor: tradeSide === "buy" ? C.green : C.red }]} onPress={submitTrade}>
+              <Text style={{ color: "#fff", fontWeight: "700" }}>Submit {tradeSide === "buy" ? "Buy" : "Sell"} Order</Text>
+            </TouchableOpacity>
+            {tradeMsg && <Text style={{ color: tradeMsg.startsWith("✅") ? C.green : C.red, fontSize: 12, marginTop: 8 }}>{tradeMsg}</Text>}
+            <TouchableOpacity onPress={() => setTradeSym(null)} style={{ alignItems: "center", marginTop: 6 }}>
+              <Text style={{ color: C.sub, fontSize: 12 }}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>

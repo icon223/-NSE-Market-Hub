@@ -3,3 +3,6 @@ export { rand, fmt, fmtPct, fmtVol, fmtTime, fmtDate } from "./format.js";
 export { genHistory, initStock, tickPool } from "./engine.js";
 export { fetchAI, sendDiscord } from "./api.js";
 export { useMarket } from "./useMarket.js";
+export {
+  getMode, getAccount, getPositions, getOrders, placeOrder, cancelOrder, getQuote, getBars,
+} from "./backend.js";

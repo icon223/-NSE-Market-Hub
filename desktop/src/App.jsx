@@ -5,9 +5,12 @@ import {
   fetchAI,
   sendDiscord,
   fmt, fmtPct, fmtVol, fmtTime, fmtDate,
-  useMarket
+  useMarket,
+  getMode, getAccount, getPositions, placeOrder,
 } from "../../core/index.js";
 import { notify, emitTray, getTauriFetch } from "./lib/tauri.js";
+
+const isTradeable = (s) => s.market === "NASDAQ" || s.market === "NYSE";
 
 function usePersistent(key, initial) {
   const [v, setV] = useState(() => {
@@ -93,6 +96,60 @@ export default function App() {
   const [loadingTips, setLoadingTips] = useState(false);
   const [tab, setTab] = useState("nse");
 
+  const [backendUrl, setBackendUrl] = usePersistent("nmh_backend", "");
+  const [serverToken, setServerToken] = usePersistent("nmh_token", "");
+  const [backendStatus, setBackendStatus] = useState("off"); // off|paper|live|error
+  const [account, setAccount] = useState(null);
+  const [positions, setPositions] = useState([]);
+  const [tradeSym, setTradeSym] = useState(null);
+  const [tradeSide, setTradeSide] = useState("buy");
+  const [tradeType, setTradeType] = useState("market");
+  const [tradeQty, setTradeQty] = useState("");
+  const [tradeLimit, setTradeLimit] = useState("");
+  const [tradeMsg, setTradeMsg] = useState("");
+
+  const connected = backendStatus === "paper" || backendStatus === "live";
+  const realMoney = backendStatus === "live";
+
+  useEffect(() => {
+    if (!backendUrl || !serverToken) {
+      setBackendStatus("off"); setAccount(null); setPositions([]); return;
+    }
+    let active = true;
+    const refresh = async () => {
+      try {
+        const m = await getMode(backendUrl, serverToken);
+        const [acc, pos] = await Promise.all([
+          getAccount(backendUrl, serverToken),
+          getPositions(backendUrl, serverToken),
+        ]);
+        if (!active) return;
+        setBackendStatus(m.paper ? "paper" : "live");
+        setAccount(acc); setPositions(pos);
+      } catch (e) {
+        if (active) setBackendStatus("error");
+      }
+    };
+    refresh();
+    const id = setInterval(refresh, 6000);
+    return () => { active = false; clearInterval(id); };
+  }, [backendUrl, serverToken]);
+
+  const submitTrade = async () => {
+    if (!tradeSym || !tradeQty) return;
+    setTradeMsg("Placing order…");
+    try {
+      const o = await placeOrder(
+        { symbol: tradeSym, qty: parseFloat(tradeQty), side: tradeSide, type: tradeType, limit_price: tradeType === "limit" ? parseFloat(tradeLimit) : undefined },
+        backendUrl, serverToken
+      );
+      setTradeMsg(`✅ Order ${o.id ? "submitted" : "ok"} (${o.status || "new"})`);
+      setTimeout(() => setTradeSym(null), 1200);
+    } catch (e) {
+      setTradeMsg("❌ " + (e && e.message ? e.message : "failed"));
+    }
+  };
+
   const onAlert = useCallback(async (a) => {
     const s = allStocksRef.current.find(x => x.ticker === a.ticker && x.market === a.market);
     if (!s) return;
@@ -107,7 +164,7 @@ export default function App() {
     setAlerts(al => [{ id: Date.now() + s.ticker, ticker: s.ticker, market: s.market, changePct: a.changePct, price: a.price, time: a.time }, ...al.slice(0, 29)]);
   }, []);
 
-  const { nse, nerob, ea, global } = useMarket({ threshold, onAlert });
+  const { nse, nerob, ea, global } = useMarket({ threshold, onAlert, backend: connected ? backendUrl : null, token: connected ? serverToken : null, live: connected });
 
   const allStocks = [...nse, ...nerob, ...ea, ...global];
   const allStocksRef = useRef(allStocks);
@@ -219,6 +276,12 @@ export default function App() {
     .btn-r:hover{background:rgba(234,57,67,.25);}
     .btn-sm{padding:3px 9px;font-size:11px;border-radius:5px;}
     .btn-xs{padding:2px 7px;font-size:10px;border-radius:4px;}
+    .modal-back{position:fixed;inset:0;background:rgba(4,8,16,.72);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;z-index:1000;}
+    .modal{background:var(--s1);border:1px solid var(--border2);border-radius:14px;padding:22px;width:min(420px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.5);}
+    .seg{flex:1;padding:9px;border-radius:8px;border:1px solid var(--border2);background:var(--s2);color:var(--text);font-weight:600;cursor:pointer;font-size:13px;}
+    .seg.on{background:var(--green);color:#000;border-color:var(--green);}
+    .seg.on.sell{background:var(--red);color:#fff;border-color:var(--red);}
+    .warn{background:rgba(234,57,67,.12);border:1px solid rgba(234,57,67,.3);color:var(--red);font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:10px;}
     .tape-wrap{overflow:hidden;background:var(--s2);border-bottom:1px solid var(--border);}
     .tape{display:flex;width:max-content;animation:scroll 45s linear infinite;}
     @keyframes scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
@@ -322,11 +385,19 @@ export default function App() {
           </div>
         </div>
         <div className="hdr-r">
-          <div className="live-badge"><div className="live-dot" />LIVE</div>
+          <div className={`live-badge`} style={connected ? { background: realMoney ? "rgba(234,57,67,.12)" : "rgba(22,199,132,.1)", borderColor: realMoney ? "rgba(234,57,67,.3)" : "rgba(22,199,132,.3)", color: realMoney ? "var(--red)" : "var(--green)" } : undefined}>
+            <div className="live-dot" />{connected ? (realMoney ? "LIVE $" : "PAPER") : "SIM"}
+          </div>
           <span className="clk">{clock} EAT · {fmtDate()}</span>
           <button className="btn btn-o btn-sm" onClick={() => setShowDiscord(v => !v)}>{showDiscord ? "✕" : "🔔"} Settings</button>
         </div>
       </div>
+
+      {realMoney && (
+        <div style={{ background: "var(--red)", color: "#fff", textAlign: "center", fontSize: 12, padding: "4px 0", fontWeight: 600 }}>
+          ⚠ LIVE REAL-MONEY TRADING — orders go to your funded Alpaca account
+        </div>
+      )}
 
       <div className="tape-wrap">
         <div className="tape">
@@ -354,6 +425,21 @@ export default function App() {
             <span style={{ fontSize: 11, color: "var(--sub)" }}>%</span>
             {webhookUrl && <span style={{ fontSize: 11, color: "var(--green)", whiteSpace: "nowrap" }}>✓ Discord</span>}
             {apiKey && <span style={{ fontSize: 11, color: "var(--green)", whiteSpace: "nowrap" }}>✓ AI</span>}
+          </div>
+        )}
+        {showDiscord && (
+          <div className="drow" style={{ marginTop: 8, alignItems: "flex-end" }}>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 10, color: "var(--sub)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 3 }}>Trading Backend URL</div>
+              <input className="inp" placeholder="http://localhost:8080" value={backendUrl} onChange={e => setBackendUrl(e.target.value)} />
+            </div>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 10, color: "var(--sub)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 3 }}>Backend Token</div>
+              <input className="inp" placeholder="SERVER_TOKEN" value={serverToken} onChange={e => setServerToken(e.target.value)} />
+            </div>
+            <span style={{ fontSize: 11, whiteSpace: "nowrap", color: backendStatus === "error" ? "var(--red)" : backendStatus === "off" ? "var(--sub)" : backendStatus === "live" ? "var(--red)" : "var(--green)" }}>
+              {backendStatus === "off" ? "● No backend" : backendStatus === "error" ? "● Error" : backendStatus === "live" ? "● LIVE $" : "● Paper"}
+            </span>
           </div>
         )}
       </div>
@@ -388,7 +474,10 @@ export default function App() {
                     <td><span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--sub)" }}>{fmtVol(s.volume)}</span></td>
                     <td><Sparkline data={s.history} color={s.changePct >= 0 ? "#16c784" : "#ea3943"} /></td>
                     <td><button className="star-btn" onClick={e => { e.stopPropagation(); toggleWatch(s.ticker); }}>{isWatched(s.ticker) ? "⭐" : "☆"}</button></td>
-                    <td><button className="btn btn-o btn-xs" onClick={e => { e.stopPropagation(); manualAlert(s); }}>📣</button></td>
+                    <td style={{whiteSpace:"nowrap"}}>
+                      {isTradeable(s) && <button className="btn btn-g btn-xs" style={{marginRight:4}} onClick={e => { e.stopPropagation(); setTradeSide("buy"); setTradeSym(s.ticker); setTradeMsg(""); }}>💱 Trade</button>}
+                      <button className="btn btn-o btn-xs" onClick={e => { e.stopPropagation(); manualAlert(s); }}>📣</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -413,7 +502,10 @@ export default function App() {
                   <div className="sb"><div className="sl">High</div><div className="sv up">{fmt(selected.high)}</div></div>
                   <div className="sb"><div className="sl">Low</div><div className="sv dn">{fmt(selected.low)}</div></div>
                 </div>
-                <div style={{ marginTop: 8 }}><button className="btn btn-o btn-sm" onClick={() => manualAlert(selected)}>📣 Discord Alert</button></div>
+                <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                  {isTradeable(selected) && <button className="btn btn-g btn-sm" onClick={() => { setTradeSide("buy"); setTradeSym(selected.ticker); setTradeMsg(""); }}>💱 Trade</button>}
+                  <button className="btn btn-o btn-sm" onClick={() => manualAlert(selected)}>📣 Discord Alert</button>
+                </div>
               </div>
             ) : (
               <div className="panel" style={{ color: "var(--sub)", fontSize: 12, textAlign: "center", padding: "28px 0" }}>Click any stock to view details</div>
@@ -475,6 +567,49 @@ export default function App() {
 
       {tab === "portfolio" && (
         <div style={{ padding: "18px 20px" }}>
+          {connected && (
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <div className="sh" style={{ padding: "14px 16px" }}>
+                <div className="st">🏦 Alpaca {realMoney ? "Live" : "Paper"} Account</div>
+                <span style={{ fontSize: 10, color: realMoney ? "var(--red)" : "var(--green)" }}>{realMoney ? "REAL MONEY" : "PAPER"}</span>
+              </div>
+              {account && (
+                <div className="pf-sum" style={{ padding: "0 16px 8px" }}>
+                  <div className="pfc"><div className="pfL">Equity</div><div className="pfV">$ {fmtVol(parseFloat(account.equity || 0))}</div></div>
+                  <div className="pfc"><div className="pfL">Buying Power</div><div className="pfV">$ {fmtVol(parseFloat(account.buying_power || 0))}</div></div>
+                  <div className="pfc"><div className="pfL">Day P&L</div><div className={`pfV ${(parseFloat(account.today_pl || 0)) >= 0 ? "up" : "dn"}`}>{parseFloat(account.today_pl || 0) >= 0 ? "+" : "-"} $ {fmtVol(Math.abs(parseFloat(account.today_pl || 0)))}</div></div>
+                </div>
+              )}
+              {positions.length === 0 ? (
+                <div style={{ color: "var(--sub)", fontSize: 13, textAlign: "center", padding: "16px 0" }}>No open positions.</div>
+              ) : (
+                <table className="mkt" style={{ margin: "0 8px 12px" }}>
+                  <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Price</th><th>Value</th><th>Unreal P&L</th><th></th></tr></thead>
+                  <tbody>
+                    {positions.map(p => {
+                      const upnl = parseFloat(p.unrealized_pl || 0);
+                      const entry = parseFloat(p.avg_entry_price || 0);
+                      const price = parseFloat(p.current_price || 0);
+                      return (
+                        <tr key={p.symbol}>
+                          <td className="tk">{p.symbol}</td>
+                          <td>{parseFloat(p.qty || 0).toLocaleString()}</td>
+                          <td className="pr">$ {fmt(entry)}</td>
+                          <td className="pr">$ {fmt(price)}</td>
+                          <td className="pr">$ {fmt(parseFloat(p.market_value || 0))}</td>
+                          <td className={upnl >= 0 ? "up" : "dn"}>{upnl >= 0 ? "+" : "-"} $ {fmtVol(Math.abs(upnl))}</td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            <button className="btn btn-g btn-xs" style={{ marginRight: 4 }} onClick={() => { setTradeSide("buy"); setTradeSym(p.symbol); setTradeMsg(""); }}>Buy</button>
+                            <button className="btn btn-r btn-xs" onClick={() => { setTradeSide("sell"); setTradeSym(p.symbol); setTradeMsg(""); }}>Sell</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
           <div className="sh"><div className="st">💼 Portfolio Tracker</div>
             <button className="btn btn-g btn-sm" onClick={() => setShowAddPos(v => !v)}>{showAddPos ? "✕ Cancel" : "+ Add Position"}</button>
           </div>
@@ -564,6 +699,32 @@ export default function App() {
               <button className="btn btn-g btn-sm" onClick={doTips} disabled={loadingTips}>↻ Refresh</button>
             </div>
             {loadingTips ? <div className="ld">Evaluating NSE positions<span className="bl" /></div> : tips ? <div className="rb">{tips}</div> : <div style={{ color: "var(--sub)" }}>Loading…</div>}
+          </div>
+        </div>
+      )}
+
+      {tradeSym && (
+        <div className="modal-back" onClick={() => setTradeSym(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>Trade {tradeSym}</div>
+              <button className="btn btn-o btn-sm" onClick={() => setTradeSym(null)}>✕</button>
+            </div>
+            {realMoney && <div className="warn">⚠ Live real-money order to your funded Alpaca account.</div>}
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button className={`seg ${tradeSide === "buy" ? "on" : ""}`} onClick={() => setTradeSide("buy")}>Buy</button>
+              <button className={`seg ${tradeSide === "sell" ? "on sell" : ""}`} onClick={() => setTradeSide("sell")}>Sell</button>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <button className={`seg ${tradeType === "market" ? "on" : ""}`} onClick={() => setTradeType("market")}>Market</button>
+              <button className={`seg ${tradeType === "limit" ? "on" : ""}`} onClick={() => setTradeType("limit")}>Limit</button>
+            </div>
+            <div className="fld" style={{ marginBottom: 10 }}><label>Quantity (shares)</label><input type="number" placeholder="10" value={tradeQty} onChange={e => setTradeQty(e.target.value)} /></div>
+            {tradeType === "limit" && (
+              <div className="fld" style={{ marginBottom: 10 }}><label>Limit Price (USD)</label><input type="number" placeholder="0.00" value={tradeLimit} onChange={e => setTradeLimit(e.target.value)} /></div>
+            )}
+            <button className={`btn ${tradeSide === "buy" ? "btn-g" : "btn-r"}`} style={{ width: "100%" }} onClick={submitTrade}>Submit {tradeSide === "buy" ? "Buy" : "Sell"} Order</button>
+            {tradeMsg && <div style={{ marginTop: 8, fontSize: 12, color: tradeMsg.startsWith("✅") ? "var(--green)" : tradeMsg.startsWith("❌") ? "var(--red)" : "var(--sub)" }}>{tradeMsg}</div>}
           </div>
         </div>
       )}
